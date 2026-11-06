@@ -12,42 +12,48 @@ const isBenignQoderStderr = (text) => {
   );
 };
 
-// Build the environment for every qodercli child process.
-// config.QODER_PAT normalises both QODER_PERSONAL_ACCESS_TOKEN and QODER_API_KEY,
-// so we always pass it under the name qodercli actually looks for.
-const qoderEnv = () => ({
-  ...process.env,
-  // Always pass the PAT under the name qodercli expects, regardless of which
-  // env var name the hosting platform used.
-  ...(config.QODER_PAT
-    ? { QODER_PERSONAL_ACCESS_TOKEN: config.QODER_PAT }
-    : {}),
-  // Prevent qodercli from trying to open a browser (headless container has none).
-  NO_BROWSER: "1",
-  // Signal a non-interactive / CI environment so qodercli skips TUI features.
-  CI: "1",
-  // Ensure HOME is set so qodercli can find ~/.qoder config (auto-updates off).
-  HOME: process.env.HOME || "/root",
-});
+// Build the environment for every Qoder CLI child process.
+// config.QODER_ACTIVE_PAT is the mode-aware PAT (QODER_CLI selects cn/global);
+// it is re-keyed under the variable name the selected CLI flavour reads:
+//   global → QODER_PERSONAL_ACCESS_TOKEN, cn → QODERCN_PERSONAL_ACCESS_TOKEN.
+const qoderEnv = () => {
+  const patEnv = config.QODER_ACTIVE_PAT
+    ? config.QODER_CLI === "cn"
+      ? { QODERCN_PERSONAL_ACCESS_TOKEN: config.QODER_ACTIVE_PAT }
+      : { QODER_PERSONAL_ACCESS_TOKEN: config.QODER_ACTIVE_PAT }
+    : {};
+  return {
+    ...process.env,
+    ...patEnv,
+    // Prevent qodercli from trying to open a browser (headless container has none).
+    NO_BROWSER: "1",
+    // Signal a non-interactive / CI environment so qodercli skips TUI features.
+    CI: "1",
+    // Ensure HOME is set so qodercli can find ~/.qoder config (auto-updates off).
+    HOME: process.env.HOME || "/root",
+  };
+};
 
 const getQoderCliCommand = () => {
-  if (process.platform === "win32")
-    return { cmd: "qodercli.cmd", viaCmd: true };
+  const bin = config.QODER_CLI === "cn" ? "qoderclicn" : "qodercli";
 
-  // Allow explicit override in container/runtime env.
+  if (process.platform === "win32")
+    return { cmd: `${bin}.cmd`, viaCmd: true };
+
+  // Allow explicit override in container/runtime env. Wins in BOTH modes.
   if (process.env.QODERCLI_BIN)
     return { cmd: process.env.QODERCLI_BIN, viaCmd: false };
 
   // Common global npm binary locations in Linux containers.
   const candidates = [
-    "/usr/local/bin/qodercli",
-    "/usr/bin/qodercli",
-    "qodercli",
+    `/usr/local/bin/${bin}`,
+    `/usr/bin/${bin}`,
+    bin,
   ];
   for (const c of candidates) {
     if (c.includes("/") && fs.existsSync(c)) return { cmd: c, viaCmd: false };
   }
-  return { cmd: "qodercli", viaCmd: false };
+  return { cmd: bin, viaCmd: false };
 };
 
 // ---------------------------------------------------------------------------
@@ -408,4 +414,6 @@ const checkQoderCli = () =>
     }, 8000);
   });
 
-module.exports = { runQoderRequest, checkQoderCli };
+// getQoderCliCommand / qoderEnv are exported for configuration tests
+// (env-combination verification of QODER_CLI / QODERCLI_BIN handling).
+module.exports = { runQoderRequest, checkQoderCli, getQoderCliCommand, qoderEnv };

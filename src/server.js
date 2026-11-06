@@ -7,7 +7,8 @@ const {
   CORS_ORIGIN,
   DASHBOARD_ENABLED,
   DASHBOARD_PASSWORD,
-  QODER_PAT,
+  QODER_CLI,
+  QODER_ACTIVE_PAT,
 } = config;
 
 const authMiddleware = require("./middleware/auth");
@@ -70,35 +71,42 @@ app.use((err, req, res, next) => {
 // ── Startup ──────────────────────────────────────────────────────────────────
 const start = async () => {
   const version = await checkQoderCli();
-  if (!QODER_PAT) {
+  const cliName = QODER_CLI === "cn" ? "qoderclicn" : "qodercli";
+  if (!QODER_ACTIVE_PAT) {
     addSystem(
-      "QODER_PERSONAL_ACCESS_TOKEN is not set — qodercli auth will fail",
+      QODER_CLI === "cn"
+        ? "QODERCN_PERSONAL_ACCESS_TOKEN is not set — qoderclicn auth will fail"
+        : "QODER_PERSONAL_ACCESS_TOKEN is not set — qodercli auth will fail",
       "error",
       "startup",
     );
     console.warn(
-      "⚠️  Set QODER_PERSONAL_ACCESS_TOKEN in your environment (or QODER_API_KEY as alias)",
+      QODER_CLI === "cn"
+        ? "⚠️  Set QODERCN_PERSONAL_ACCESS_TOKEN in your environment (or QODER_PERSONAL_ACCESS_TOKEN as alias)"
+        : "⚠️  Set QODER_PERSONAL_ACCESS_TOKEN in your environment (or QODER_API_KEY as alias)",
     );
   }
 
   if (version && version !== "timeout") {
-    addSystem(`qodercli detected: ${version}`, "info", "startup");
+    addSystem(`${cliName} detected: ${version}`, "info", "startup");
   } else if (version === "timeout") {
     addSystem(
-      "qodercli startup check timed out — binary may exist but failed to start quickly",
+      `${cliName} startup check timed out — binary may exist but failed to start quickly`,
       "error",
       "startup",
     );
     console.warn(
-      "⚠️  qodercli startup check timed out. Set QODERCLI_BIN (e.g. /usr/local/bin/qodercli) and verify container CPU/memory limits.",
+      `⚠️  ${cliName} startup check timed out. Set QODERCLI_BIN (e.g. /usr/local/bin/${cliName}) and verify container CPU/memory limits.`,
     );
   } else {
     addSystem(
-      "qodercli not found on PATH — requests will fail",
+      `${cliName} not found on PATH — requests will fail`,
       "error",
       "startup",
     );
-    console.warn("⚠️  Install: npm install -g @qoder-ai/qodercli");
+    console.warn(
+      `⚠️  Install: npm install -g ${QODER_CLI === "cn" ? "@qodercn-ai/qoderclicn" : "@qoder-ai/qodercli"}`,
+    );
   }
 
   if (!API_KEY) {
