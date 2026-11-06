@@ -30,14 +30,77 @@ docker run -d \
   -e QODER_PERSONAL_ACCESS_TOKEN="your-qoder-pat" \
   -e PROXY_API_KEY="your-secret-custom-key" \
   -e DASHBOARD_PASSWORD="secure-dashboard-password" \
-  ghcr.io/foxy1402/qoder-proxy:latest
+  ghcr.io/luoxufeiyan/qoder-proxy:latest
 ```
+
+### Deploying with the China Edition (`QODER_CLI=cn`)
+
+The image ships **both** Qoder CLIs (`@qoder-ai/qodercli` + `@qodercn-ai/qoderclicn`). Pick one at runtime with the optional **`QODER_CLI`** env var — no separate image needed. You need a PAT for the matching edition:
+
+| Edition | `QODER_CLI` | CLI binary | PAT application page |
+|---|---|---|---|
+| Global (default) | `global` | `qodercli` | https://qoder.com/account/integrations |
+| China (CN) | `cn` | `qoderclicn` | https://qoder.com.cn/account/integrations |
+
+**docker run (minimal, cn mode):**
+
+```bash
+docker run -d \
+  --name qoder-proxy \
+  -p 3000:3000 \
+  -e QODER_CLI=cn \
+  -e QODERCN_PERSONAL_ACCESS_TOKEN="your-qoder-cn-pat" \
+  -e PROXY_API_KEY="your-secret-custom-key" \
+  -e DASHBOARD_PASSWORD="secure-dashboard-password" \
+  ghcr.io/luoxufeiyan/qoder-proxy:latest
+```
+
+**docker compose / Dokploy (minimal, cn mode):**
+
+```yaml
+services:
+  qoder-proxy:
+    image: ghcr.io/luoxufeiyan/qoder-proxy:latest
+    restart: unless-stopped
+    ports:
+      - "3300:3000"        # host:container — container side is always 3000
+    environment:
+      QODER_CLI: cn
+      QODERCN_PERSONAL_ACCESS_TOKEN: ${QODERCN_PERSONAL_ACCESS_TOKEN}
+      PROXY_API_KEY: ${PROXY_API_KEY}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+```
+
+> **Dokploy**: create a Compose service with **raw** source type (choosing GitHub errors with `Github Provider not found`), paste the YAML above, fill the three `${...}` values in the **Environment** tab, then **Deploy**. Persistence is not required — the proxy is stateless.
+
+### `QODER_CLI` Edition Selection Reference
+
+| Behavior | Value |
+|---|---|
+| Accepted values | `cn` \| `global` (case-insensitive, whitespace-trimmed) |
+| Default | `global` — unset deployments behave byte-for-byte like before |
+| Invalid value (e.g. `cnx`) | logs `[config] Invalid QODER_CLI ... falling back to "global"` and falls back to `global` |
+
+**PAT resolution priority** (the resolved token is re-keyed under the variable the selected CLI reads):
+
+| Mode | Priority |
+|---|---|
+| `cn` | `QODERCN_PERSONAL_ACCESS_TOKEN` > `QODER_PERSONAL_ACCESS_TOKEN` > `QODER_API_KEY` |
+| `global` | `QODER_PERSONAL_ACCESS_TOKEN` > `QODER_API_KEY` (unchanged legacy order) |
+
+- Empty strings never win: an accidentally empty `QODERCN_PERSONAL_ACCESS_TOKEN=` falls through to the next source.
+- **`QODERCLI_BIN`** — explicit binary path override; wins in **both** modes (e.g. `-e QODERCLI_BIN=/usr/local/bin/qoderclicn`).
+- Startup self-check is mode-aware: in `cn` mode a missing token warns about `QODERCN_PERSONAL_ACCESS_TOKEN` only — no false alarm when only that variable is set.
+- CN model tiers (tested): `auto` / `ultimate` / `performance` / `efficient` / `qmodel` / `dmodel` / `dfmodel` / `kmodel` / `gm51model` work; **`lite` is unavailable on Qoder CN** (`Session model "lite" is unavailable`). Unknown model names fall back to `auto` (see `src/helpers/format.js`).
 
 ### Environment Variables
 
 | Variable | Description | Required | Profile/Type |
 |---|---|---|---|
-| `QODER_PERSONAL_ACCESS_TOKEN` | Your Personal Access Token from [Qoder Integrations](https://qoder.com/account/integrations) | **Yes** | Secret |
+| `QODER_CLI` | Which Qoder edition to drive: `global` (default, binary `qodercli`) or `cn` (binary `qoderclicn`). Case-insensitive; invalid values warn and fall back to `global` | No | Defaults to `global` |
+| `QODER_PERSONAL_ACCESS_TOKEN` | Your Personal Access Token from [Qoder Integrations](https://qoder.com/account/integrations) — primary token for `global` mode, accepted as alias in `cn` mode | **Yes** (either this or `QODERCN_…` in cn mode) | Secret |
+| `QODERCN_PERSONAL_ACCESS_TOKEN` | China-edition PAT from [Qoder CN Integrations](https://qoder.com.cn/account/integrations); only read when `QODER_CLI=cn`, where it has top priority | **Yes** in cn mode | Secret |
+| `QODERCLI_BIN` | Explicit path to the CLI binary; overrides the mode's default binary in both modes (e.g. `/usr/local/bin/qoderclicn`) | No | Path |
 | `PROXY_API_KEY` | The secret key *you* choose to protect the `/v1` API from outside internet requests | **Yes*** | Secret (Bearer Token) |
 | `DASHBOARD_PASSWORD` | Password to access the web UI at `/dashboard/` | **Yes*** | Secret |
 | `PORT` | Container internal TCP port | No | Defaults to `3000` |
