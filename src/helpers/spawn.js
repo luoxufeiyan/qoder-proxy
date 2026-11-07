@@ -62,26 +62,34 @@ const getQoderCliCommand = () => {
 
 const spawnQoderCli = (prompt, model, flags = []) => {
   const qoder = getQoderCliCommand();
-  if (process.platform === "win32") {
-    // On Windows, pass a cmd-safe prompt to avoid shell interpretation of
-    // special characters (&, |, >, <, ^, ").
-    const safePrompt = prompt.replace(/"/g, '\\"').replace(/[&|<>^]/g, "^$&");
-    const args = ["/c", qoder.cmd, "-p", safePrompt, "-f", "stream-json"];
-    if (model) args.push("--model", model);
-    if (flags.length) args.push(...flags);
-    return spawn("cmd.exe", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: qoderEnv(),
-    });
-  } else {
-    const args = ["-p", prompt, "-f", "stream-json"];
-    if (model) args.push("--model", model);
-    if (flags.length) args.push(...flags);
-    return spawn(qoder.cmd, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: qoderEnv(),
-    });
-  }
+
+  // The prompt is fed through stdin, never through argv.
+  // Linux caps a single argv entry at MAX_ARG_STRLEN (128KB), so long
+  // conversations used to die instantly with `spawn E2BIG` (HTTP 500).
+  // `qodercli -p -f stream-json` reads the prompt from stdin when no query
+  // argument is supplied — verified against CLI 1.1.84 with 132KB of input.
+  // This also removes the Windows cmd.exe quoting hazard entirely.
+  const args = ["-p", "-f", "stream-json"];
+  if (model) args.push("--model", model);
+  if (flags.length) args.push(...flags);
+
+  const useCmdShim = process.platform === "win32";
+  const child = useCmdShim
+    ? spawn("cmd.exe", ["/c", qoder.cmd, ...args], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: qoderEnv(),
+      })
+    : spawn(qoder.cmd, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: qoderEnv(),
+      });
+
+  // The CLI may exit before draining stdin (bad auth, crash); an unhandled
+  // EPIPE on the child's stdin would otherwise surface as a process error.
+  child.stdin.on("error", () => {});
+  child.stdin.end(prompt, "utf8");
+
+  return child;
 };
 
 const parseStreamJsonLine = (line) => {
