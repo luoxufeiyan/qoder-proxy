@@ -154,6 +154,18 @@ router.post("/", (req, res) => {
     let fullStreamText = "";
     // Whether any content delta has already been sent to the client
     let streamedContent = false;
+    // Whether a native tool_use block was forwarded as OpenAI tool_calls
+    let emittedToolCalls = false;
+
+    // Only tool names declared by the client may be forwarded; anything else
+    // is the CLI's own agent machinery and must not leak into the response.
+    const declaredToolNames = new Set(
+      hasTools
+        ? tools
+            .filter((t) => t && t.type === "function" && t.function?.name)
+            .map((t) => t.function.name)
+        : [],
+    );
 
     let clientAborted = false;
     const child = runQoderRequest({
@@ -162,6 +174,49 @@ router.post("/", (req, res) => {
       flags,
       timeoutMs: QODER_TIMEOUT_MS,
       onChunk: (data) => {
+        // Native tool_use blocks (present when QODER_NATIVE_TOOLS=on, or if a
+        // future CLI ignores --tools "") map straight onto tool_calls.
+        if (hasTools && !emittedToolCalls) {
+          const nativeCalls = extractToolCalls(data.message?.content) || [];
+          const declared = nativeCalls.filter((tc) =>
+            declaredToolNames.has(tc.function.name),
+          );
+          if (declared.length > 0) {
+            const tcChunk = {
+              id,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { tool_calls: declared },
+                  finish_reason: null,
+                },
+              ],
+            };
+            res.write(`data: ${JSON.stringify(tcChunk)}\n\n`);
+            emittedToolCalls = true;
+            lastFinishReason = "tool_calls";
+            // The client now owns the call: close the stream instead of
+            // waiting for the CLI to run (and fail) its own tool loop.
+            if (!res.writableEnded) {
+              res.write(
+                `data: ${JSON.stringify(buildDoneChunk(model, id, "tool_calls"))}\n\n`,
+              );
+              res.write("data: [DONE]\n\n");
+              res.end();
+            }
+            try {
+              child.kill();
+            } catch {
+              // already exited
+            }
+            return;
+          }
+        }
+        if (emittedToolCalls) return;
+
         const content = extractTextContent(data.message);
         const finishReason = data.message?.stop_reason || null;
         if (!hasReceivedData) {

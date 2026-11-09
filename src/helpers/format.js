@@ -22,6 +22,9 @@ const extractTextContent = (message) => {
       .map((part) => {
         if (!part) return "";
         if (typeof part === "string") return part;
+        // Only real text blocks are assistant output. Thinking, tool_use and
+        // tool_result blocks must never be surfaced as chat content.
+        if (part.type && part.type !== "text") return "";
         if (typeof part.text === "string") return part.text;
         if (typeof part.value === "string") return part.value;
         return "";
@@ -358,16 +361,24 @@ const extractToolCalls = (content) => {
 
   const toolCalls = [];
   for (const item of content) {
-    if (item.type === "function" && item.id && item.name && item.input) {
-      toolCalls.push({
-        id: item.id,
-        type: "function",
-        function: {
-          name: item.name,
-          arguments: item.input,
-        },
-      });
+    // qodercli emits native calls as `tool_use`; older payloads used
+    // `function`. Both map onto the OpenAI tool_calls shape.
+    if (
+      !item ||
+      (item.type !== "tool_use" && item.type !== "function") ||
+      !item.name
+    ) {
+      continue;
     }
+    const args =
+      typeof item.input === "string"
+        ? item.input
+        : JSON.stringify(item.input ?? {});
+    toolCalls.push({
+      id: item.id || newId("call"),
+      type: "function",
+      function: { name: item.name, arguments: args },
+    });
   }
 
   return toolCalls.length > 0 ? toolCalls : null;

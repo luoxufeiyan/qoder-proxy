@@ -71,6 +71,16 @@ const spawnQoderCli = (prompt, model, flags = []) => {
   // This also removes the Windows cmd.exe quoting hazard entirely.
   const args = ["-p", "-f", "stream-json"];
   if (model) args.push("--model", model);
+
+  // qodercli is an agent: left alone it runs its own Bash/Read/MCP tool loop
+  // inside this container, and the wrapper's OpenAI tool protocol never gets
+  // a chance. Built-in tools are therefore disabled by default so the model
+  // answers the prompt (and emits the fake tool_call JSON) instead of poking
+  // at the proxy container's filesystem. Set QODER_NATIVE_TOOLS=on to restore
+  // the old agent behaviour.
+  const nativeTools = (process.env.QODER_NATIVE_TOOLS || "off").trim().toLowerCase();
+  if (nativeTools !== "on") args.push("--tools", "");
+
   if (flags.length) args.push(...flags);
 
   const useCmdShim = process.platform === "win32";
@@ -107,6 +117,7 @@ const hasVisibleAssistantText = (data) => {
   return content.some((part) => {
     if (!part) return false;
     if (typeof part === "string") return part.trim().length > 0;
+    if (part.type && part.type !== "text") return false;
     if (typeof part.text === "string" && part.text.trim()) return true;
     if (typeof part.value === "string" && part.value.trim()) return true;
     return false;
@@ -265,7 +276,11 @@ const runQoderRequest = ({
         ) {
           if (hasVisibleAssistantText(data)) sawAssistantMessage = true;
           onChunk(data);
-        } else {
+        } else if (data.type === "result") {
+          // Only the final `result` event may be promoted to text. Tool
+          // results arrive as `user` events; deep-scanning those leaked the
+          // container's shell output and "Tool not found" errors into the
+          // chat reply.
           const fallbackText = extractEventText(data);
           if (!fallbackText || sawAssistantMessage) continue;
           if (fallbackText === lastSyntheticText) continue;
@@ -306,7 +321,7 @@ const runQoderRequest = ({
       ) {
         if (hasVisibleAssistantText(data)) sawAssistantMessage = true;
         onChunk(data);
-      } else {
+      } else if (data.type === "result") {
         const fallbackText = extractEventText(data);
         if (!fallbackText || sawAssistantMessage) return;
         if (fallbackText === lastSyntheticText) return;
