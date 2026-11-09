@@ -3,6 +3,7 @@ const {
   getModelMapping,
   messagesToPrompt,
   extractTextContent,
+  extractThinkingContent,
   extractToolCalls,
   newId,
   buildStreamChunk,
@@ -217,6 +218,27 @@ router.post("/", (req, res) => {
         }
         if (emittedToolCalls) return;
 
+        // Forward reasoning separately: clients render it in a thinking block,
+        // and it gives the stream an early first chunk even when the final
+        // answer takes a long time to generate.
+        const thinking = extractThinkingContent(data.message);
+        if (thinking) {
+          const thinkChunk = {
+            id,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content: thinking },
+                finish_reason: null,
+              },
+            ],
+          };
+          res.write(`data: ${JSON.stringify(thinkChunk)}\n\n`);
+        }
+
         const content = extractTextContent(data.message);
         const finishReason = data.message?.stop_reason || null;
         if (!hasReceivedData) {
@@ -327,6 +349,7 @@ router.post("/", (req, res) => {
   } else {
     // Non-streaming path
     let fullContent = "";
+    let fullReasoning = "";
     let finishReason = "stop";
     let allToolCalls = [];
     let clientAborted = false;
@@ -337,6 +360,8 @@ router.post("/", (req, res) => {
       flags,
       timeoutMs: QODER_TIMEOUT_MS,
       onChunk: (data) => {
+        const thinking = extractThinkingContent(data.message);
+        if (thinking) fullReasoning += thinking;
         const content = extractTextContent(data.message);
         const toolCalls = extractToolCalls(data.message?.content);
         if (content) fullContent += content;
@@ -370,17 +395,28 @@ router.post("/", (req, res) => {
         }
 
         if (allToolCalls.length > 0) {
-          res.json(
-            buildFullChatResponseWithTools(
-              allToolCalls,
-              fullContent || null,
-              model,
-              finishReason,
-              id,
-            ),
+          const payload = buildFullChatResponseWithTools(
+            allToolCalls,
+            fullContent || null,
+            model,
+            finishReason,
+            id,
           );
+          if (fullReasoning) {
+            payload.choices[0].message.reasoning_content = fullReasoning;
+          }
+          res.json(payload);
         } else {
-          res.json(buildFullChatResponse(fullContent, model, finishReason, id));
+          const payload = buildFullChatResponse(
+            fullContent,
+            model,
+            finishReason,
+            id,
+          );
+          if (fullReasoning) {
+            payload.choices[0].message.reasoning_content = fullReasoning;
+          }
+          res.json(payload);
         }
       },
       onError: (err) => {

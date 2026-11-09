@@ -385,6 +385,24 @@ const extractToolCalls = (content) => {
 };
 
 /**
+ * Extract reasoning/thinking text from a qodercli message object.
+ * Thinking is forwarded separately as `delta.reasoning_content` so clients can
+ * render it in a thinking block and so the stream produces a first chunk early.
+ */
+const extractThinkingContent = (message) => {
+  if (!message || !Array.isArray(message.content)) return "";
+  return message.content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      if (part.type !== "thinking") return "";
+      if (typeof part.thinking === "string") return part.thinking;
+      if (typeof part.text === "string") return part.text;
+      return "";
+    })
+    .join("");
+};
+
+/**
  * Build streaming chunk with tool calls
  * @param {Object} data - qodercli data object
  * @param {string} model - model name
@@ -447,6 +465,7 @@ const buildFullChatResponseWithTools = (
 module.exports = {
   newId,
   extractTextContent,
+  extractThinkingContent,
   extractToolCalls,
   getModelMapping,
   messagesToPrompt,
