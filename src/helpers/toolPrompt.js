@@ -46,8 +46,63 @@ ${defs}`;
 };
 
 /**
+ * Default character budget for the assembled prompt. Older messages are
+ * dropped only when this limit is exceeded, and never the current turn.
+ * Override with QODER_PROMPT_MAX_CHARS.
+ */
+const DEFAULT_PROMPT_MAX_CHARS = 300000;
+
+const promptMaxChars = () => {
+  const raw = parseInt(process.env.QODER_PROMPT_MAX_CHARS || '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PROMPT_MAX_CHARS;
+};
+
+/** Flatten an OpenAI message content field into plain text. */
+const contentToText = (content) => {
+  if (Array.isArray(content)) {
+    return content
+      .filter((p) => p && (typeof p === 'string' || !p.type || p.type === 'text'))
+      .map((p) => (typeof p === 'string' ? p : p.text || p.value || ''))
+      .join('');
+  }
+  if (typeof content === 'string') return content;
+  return '';
+};
+
+/** Render one conversation message with a role label for the CLI prompt. */
+const renderMessage = (msg) => {
+  const content = contentToText(msg.content).trim();
+  if (msg.role === 'user') return content ? `User: ${content}` : '';
+  if (msg.role === 'assistant') {
+    const lines = [];
+    if (content) lines.push(`Assistant: ${content}`);
+    if (Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        const fn = tc && tc.function ? tc.function : {};
+        if (fn.name) {
+          lines.push(`Assistant called: ${fn.name}(${fn.arguments || '{}'})`);
+        }
+      }
+    }
+    return lines.join('\n');
+  }
+  if (msg.role === 'tool') {
+    if (!content) return '';
+    const label = msg.name ? `Tool result (${msg.name})` : 'Tool result';
+    return `${label}: ${content}`;
+  }
+  return content ? `${msg.role}: ${content}` : '';
+};
+
+/**
  * Inject tool instructions into a messages array by prepending/merging
  * a system message, then convert to prompt string.
+ *
+ * Context policy: keep every system message and every message from the newest
+ * user message onwards, then walk backwards adding older turns until the
+ * character budget is exhausted. A fixed "last N messages" window used to
+ * drop the user's request in long tool loops, which made the model believe
+ * the context was lost and spend tokens re-recallng it.
  *
  * @param {Array}  messages - OpenAI messages array
  * @param {Array}  tools    - OpenAI tools array
@@ -61,39 +116,53 @@ const buildPromptWithTools = (messages, tools, messagesToPromptFn) => {
 
   const toolSystem = buildToolSystemPrompt(tools);
 
-  // Extract system message separately
-  const existingSystem = messages.find((m) => m.role === 'system');
-  const systemContent = existingSystem
-    ? Array.isArray(existingSystem.content)
-      ? existingSystem.content.filter((p) => p.type === 'text').map((p) => p.text).join('')
-      : existingSystem.content || ''
-    : '';
+  // Every system message matters (QwenPaw may send more than one).
+  const systemContent = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => contentToText(m.content).trim())
+    .filter(Boolean)
+    .join('\n\n');
 
-  // Get conversation messages (non-system), keep last 10 turns for context
   const conversation = messages.filter((m) => m.role !== 'system');
-  const recent = conversation.slice(-10);
+  const rendered = conversation.map(renderMessage);
 
-  const extractContent = (msg) => {
-    if (Array.isArray(msg.content)) {
-      return msg.content.filter((p) => p.type === 'text').map((p) => p.text).join('');
+  // The newest user message starts the current turn: it and everything after
+  // it are always kept, regardless of the budget.
+  let lastUserIdx = -1;
+  for (let i = conversation.length - 1; i >= 0; i--) {
+    if (conversation[i].role === 'user') {
+      lastUserIdx = i;
+      break;
     }
-    // Handle tool_result messages from multi-turn tool calling
-    if (typeof msg.content === 'string') return msg.content;
-    return '';
-  };
-
-  // Build the prompt parts
-  const parts = [toolSystem];
-  if (systemContent.trim()) parts.push(`System context: ${systemContent.trim()}`);
-
-  // Include conversation history with role labels
-  for (const msg of recent) {
-    const content = extractContent(msg).trim();
-    if (!content) continue;
-    if (msg.role === 'user') parts.push(`User: ${content}`);
-    else if (msg.role === 'assistant') parts.push(`Assistant: ${content}`);
-    else if (msg.role === 'tool') parts.push(`Tool result: ${content}`);
   }
+  const mustKeepFrom = lastUserIdx >= 0 ? lastUserIdx : 0;
+
+  const maxChars = promptMaxChars();
+  let used = toolSystem.length + systemContent.length;
+  const selected = [];
+  for (let i = conversation.length - 1; i >= 0; i--) {
+    const text = rendered[i];
+    if (!text) continue;
+    const size = text.length + 8;
+    if (i >= mustKeepFrom) {
+      selected.unshift(text);
+      used += size;
+      continue;
+    }
+    if (used + size > maxChars) break;
+    selected.unshift(text);
+    used += size;
+  }
+
+  if (selected.length < conversation.length) {
+    console.log(
+      `[prompt] kept ${selected.length}/${conversation.length} messages (~${used} chars, budget ${maxChars})`,
+    );
+  }
+
+  const parts = [toolSystem];
+  if (systemContent) parts.push(`System context: ${systemContent}`);
+  parts.push(...selected);
 
   return parts.join('\n\n');
 };

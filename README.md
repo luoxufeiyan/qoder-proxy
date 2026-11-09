@@ -107,6 +107,8 @@ services:
 | `DASHBOARD_ENABLED`| Set to `false` to disable the web UI | No | Defaults to `true` |
 | `CORS_ORIGIN` | Allowed origins for browser-based web clients (sets the `Access-Control-Allow-Origin` HTTP header). `*` = allow all domains. Set to a specific URL (e.g. `https://myapp.com`) to restrict access. Has no effect on server-to-server or CLI calls. | No | Defaults to `*` (allow all) |
 | `QODER_TIMEOUT_MS`| Maximum request timeout | No | Defaults to `120000` (2 min) |
+| `QODER_PROMPT_MAX_CHARS` | Character budget for the assembled prompt. Older turns are trimmed only when the budget is exceeded; the newest user message and everything after it are always kept | No | Defaults to `300000` (~100k tokens) |
+| `QODER_NATIVE_TOOLS` | Set to `on` to let the CLI use its own built-in tools. Leave unset/`off` so the model answers via the OpenAI `tool_calls` protocol instead of running Bash/Read inside the container | No | Defaults to `off` |
 
 *\* Highly recommended when running on the public internet.*
 
