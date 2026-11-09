@@ -28,6 +28,19 @@ const setSSEHeaders = (res) => {
   res.setHeader("X-Accel-Buffering", "no");
 };
 
+/**
+ * Decide whether accumulated model text may still turn out to be a tool call.
+ *
+ * The tool system prompt requires a call to be a bare JSON object (optionally
+ * fenced). Anything that starts with other characters is a normal answer and
+ * can be streamed right away instead of being buffered until the CLI exits.
+ */
+const mayBeToolCall = (text) => {
+  const trimmed = text.trimStart();
+  if (!trimmed) return false;
+  return trimmed.startsWith("{") || trimmed.startsWith("```");
+};
+
 // ── GET handler for client compatibility ────────────────────────────────────
 router.get("/", (req, res) => {
   // Return helpful error - OpenAI SDK should use POST
@@ -139,6 +152,8 @@ router.post("/", (req, res) => {
     let hasReceivedData = false;
     // Accumulate full text so we can detect tool calls at the end
     let fullStreamText = "";
+    // Whether any content delta has already been sent to the client
+    let streamedContent = false;
 
     let clientAborted = false;
     const child = runQoderRequest({
@@ -160,10 +175,12 @@ router.post("/", (req, res) => {
         if (finishReason) lastFinishReason = finishReason;
         if (content) {
           fullStreamText += content;
-          // When tools are present: accumulate silently, don't stream raw text chunks.
-          // The response will be emitted as a proper tool_calls chunk in onDone.
-          // When no tools: stream content immediately as normal.
-          if (!hasTools) {
+          // With tools present we must not leak a raw tool-call JSON as text.
+          // Buffer only while the text could still be a tool call; once it is
+          // clearly a normal answer (or already started streaming), send it.
+          const shouldStream =
+            !hasTools || streamedContent || !mayBeToolCall(fullStreamText);
+          if (shouldStream) {
             const chunk = {
               id,
               object: "chat.completion.chunk",
@@ -172,6 +189,7 @@ router.post("/", (req, res) => {
               choices: [{ index: 0, delta: { content }, finish_reason: null }],
             };
             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+            streamedContent = true;
           }
         }
       },
@@ -185,8 +203,10 @@ router.post("/", (req, res) => {
           );
         }
 
-        // Check if the full accumulated text is actually a tool call
-        if (hasTools) {
+        // Text buffered in case it was a tool call: emit it as a normal answer
+        // when parsing says otherwise. Without this the client receives an
+        // empty response for every text answer sent with tools declared.
+        if (hasTools && !streamedContent) {
           const toolCall = parseToolCallFromText(fullStreamText);
           if (toolCall) {
             const callId = `call_${newId("tc").replace("tc-", "")}`;
@@ -207,6 +227,20 @@ router.post("/", (req, res) => {
             };
             res.write(`data: ${JSON.stringify(tcChunk)}\n\n`);
             lastFinishReason = "tool_calls";
+          } else if (fullStreamText.trim()) {
+            console.log(
+              "[Stream] emitting buffered text as content (no tool call detected)",
+            );
+            const chunk = {
+              id,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model,
+              choices: [
+                { index: 0, delta: { content: fullStreamText }, finish_reason: null },
+              ],
+            };
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
           }
         }
 
